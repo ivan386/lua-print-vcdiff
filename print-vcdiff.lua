@@ -1,8 +1,8 @@
 -- lua 5.3
 
-local show_data = true
+local show_data --= true
 local utf8_data = true
-local extended_info = true
+local extended_info --= true
 
 function to_stream(data)
 	local pos = 1
@@ -205,12 +205,10 @@ function read_window_header(stream)
 	return window
 end
 
-function cache_init(window_header, target_offset)
+function cache_init(window_header, window_offset)
 	return {
-		segment_position = window_header.segment_position or target_offset,
-		segment_length = window_header.segment_length or window_header.target_length,
-		source_start = 0,
-		target_address = target_offset or 0,
+		segment_length = window_header.segment_length or nil,
+		here = window_header.segment_length or 0,
 		near_size = 4, -- mode: 2, 3, 4, 5
 		same_size = 3, -- mode: 6, 7, 8
 		next_near_index = 0,
@@ -235,8 +233,8 @@ function cache_update(address_cache, address)
 	return address
 end
 
-function update_target(address_cache, size)
-	address_cache.target_address = address_cache.target_address + size
+function update_here(address_cache, size)
+	address_cache.here = address_cache.here + size
 	return size
 end
 
@@ -253,7 +251,7 @@ function decode_address(address_stream, copy_mode, address_cache)
 	elseif copy_mode == 1 then
 		mode_name = "here"
 		address_value = read_int( address_stream )
-		address = address_cache.target_address - address_value
+		address = address_cache.here - address_value
 	elseif copy_mode < 2 + address_cache.near_size then
 		mode_name = "near"
 		local near_index = copy_mode - 2
@@ -280,25 +278,27 @@ function decode_standart_instructions(instructions_stream, address_stream, addre
 		local address, mode_name, address_value, cache_value  =
 			decode_address(address_stream, copy_mode, address_cache)
 			
-		update_target( address_cache, copy_size )
+		update_here( address_cache, copy_size )
 		
+		local use_source = true
 		local source_address = address
 		
-		if source_address < 0 then
-			source_address = address_cache.segment_length + source_address
+		if not address_cache.segment_length then
+			use_source = false
+		elseif address >= address_cache.segment_length then
+			use_source = false
+			source_address = address - address_cache.segment_length
 		end
 		
-		source_address = address_cache.segment_position + source_address
-		
-		return source_address, mode_name, copy_mode, address_value, address, cache_value
+		return use_source, source_address, mode_name, copy_mode, address_value, address, cache_value
 	end
 
 	if index == 0 then
-		return {"RUN", update_target(address_cache, read_int(instructions_stream))}, nil, index
+		return {"RUN", update_here(address_cache, read_int(instructions_stream))}, nil, index
 	end
 	
 	if index == 1 then
-		return {"ADD", update_target(address_cache, read_int(instructions_stream))}, nil, index
+		return {"ADD", update_here(address_cache, read_int(instructions_stream))}, nil, index
 	end
 	
 	local copy_modes = {
@@ -312,7 +312,7 @@ function decode_standart_instructions(instructions_stream, address_stream, addre
 	end
 	
 	if index < 19 then
-		return { "ADD", update_target(address_cache, index - 1) }, nil, index
+		return { "ADD", update_here(address_cache, index - 1) }, nil, index
 	end
 	
 	if index < 163 then
@@ -324,18 +324,18 @@ function decode_standart_instructions(instructions_stream, address_stream, addre
 		local copy_mode = (index - 163) // 12
 		local sizes = (index - 163) % 12
 		local copy_size = 4 + sizes % 3
-		local add_size = update_target(address_cache, 1 + sizes // 3)
+		local add_size = update_here(address_cache, 1 + sizes // 3)
 		return { "ADD", add_size }, { "CPY", copy_size, decode( copy_mode, copy_size ) }, index
 	end
 	
 	if index < 247 then
 		local copy_mode = (index - 235) // 4
-		local add_size = update_target(address_cache, 1 + ((index - 235) % 4))
+		local add_size = update_here(address_cache, 1 + ((index - 235) % 4))
 		return { "ADD", add_size }, { "CPY", 4, decode( copy_mode, 4 ) }, index
 	end
 	
 	if index < 256 then
-		return { "CPY", 4, decode( index - 247, 4 ) }, {"ADD", update_target(address_cache, 1)}, index
+		return { "CPY", 4, decode( index - 247, 4 ) }, {"ADD", update_here(address_cache, 1)}, index
 	end
 end
 
@@ -391,9 +391,18 @@ VCDIFF data section length:   %s
 VCDIFF inst section length:   %s
 VCDIFF addr section length:   %s
 
+]]):format(window_header.delta_length, window_header.target_length, to_bits(window_header.delta.indicator), window_header.delta.data_length, window_header.delta.instructions_length, window_header.delta.addresses_length ))
+
+	if (show_data or extended_info) then
+		io.write([[
   Offset Code Type1 Size1  @Addr1 
          +    Type2 Size2  @Addr2
-]]):format(window_header.delta_length, window_header.target_length, to_bits(window_header.delta.indicator), window_header.delta.data_length, window_header.delta.instructions_length, window_header.delta.addresses_length ))
+		]])
+	else
+		io.write([[
+  Offset Code Type1 Size1  @Addr1 + Type2 Size2 @Addr2
+		]])
+	end
 end
 
 function main(file_name)
@@ -412,7 +421,6 @@ function main(file_name)
 		
 		assert(window_header.delta.indicator == 0, "compression not supported")
 		
-		local source_char = ((window_header.indicator & 1 == 1) and "S@") or "T@"
 		
 		local data_stream = to_stream(input:read(window_header.delta.data_length))
 		local instructions_stream = to_stream(input:read(window_header.delta.instructions_length))
@@ -423,20 +431,27 @@ function main(file_name)
 		local start_pos = instructions_stream:seek() 
 		while instructions_stream:seek() - start_pos < window_header.delta.instructions_length do
 			
-			io.write("\n  ", prefix("0", 6, address_cache.target_address) , " ")
+			io.write("\n  ", prefix("0", 6, window_offset + address_cache.here - (window_header.segment_length or 0)) , " ")
 			
 			local first_inst, second_inst, index = decode_standart_instructions(instructions_stream, addresses_stream, address_cache)
 			
 			io.write(prefix("0", 3, index), "  ")
 			
 			for index, instruction in ipairs({first_inst, second_inst}) do
-				local name, size, address, mode_name, mode, address_value, result_address, cache_value = table.unpack(instruction)
-				if index > 1 then
+				local name, size, use_source, address, mode_name, mode, address_value, result_address, cache_value = table.unpack(instruction)
+				if (show_data or extended_info) and index > 1 then
 					io.write("\n         +    ")
 				end
 				
 				if name == "CPY" then
-					io.write(name, "_", mode, " ", prefix(" ", 6, size), " ", source_char, sufix(" ", 5, address))
+					if use_source then
+						address_prefix = "S@"
+						address = window_header.segment_position + address
+					else
+						address_prefix = "T@"
+					end
+				
+					io.write(name, "_", mode, " ", prefix(" ", 6, size), " ", address_prefix, sufix(" ", 5, address))
 					if extended_info then
 						io.write("\t", mode_name)
 						
@@ -462,7 +477,7 @@ function main(file_name)
 				end
 			end
 		end
-		window_offset = address_cache.target_address
+		window_offset = window_offset + address_cache.here - (window_header.segment_length or 0)
 		window_header = read_window_header(input)
 		window_index = window_index + 1
 	end
