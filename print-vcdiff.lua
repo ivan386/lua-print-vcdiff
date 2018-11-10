@@ -25,12 +25,12 @@ function to_hex(data)
 end
 
 function to_bits(int)
-	local bits = "b"
+	local bits = ""
 	repeat
 		bits = (int & 1)..bits
 		int = int >> 1
 	until (int == 0)
-	return bits
+	return "0B"..bits
 end
 
 function read_byte(stream)
@@ -256,7 +256,7 @@ function decode_address(address_stream, copy_mode, address_cache)
 		mode_name = "near"
 		local near_index = copy_mode - 2
 		address_value = read_int( address_stream )
-		cache_value = address_cache.near[near_index]
+		cache_value = address_cache.near[near_index] or 0
 		assert(cache_value, "near slot empty")
 		address = cache_value + address_value
 	elseif copy_mode < 2 + address_cache.near_size + address_cache.same_size then
@@ -264,7 +264,7 @@ function decode_address(address_stream, copy_mode, address_cache)
 		local same_mode = copy_mode - (2 + address_cache.near_size)
 		address_value = read_byte( address_stream )
 		same_index = same_mode * 256 + address_value
-		address = address_cache.same[same_index]
+		address = address_cache.same[same_index] or 0
 		assert(address,  "same slot empty")
 	end
 	
@@ -329,7 +329,7 @@ function decode_standart_instructions(instructions_stream, address_stream, addre
 	end
 	
 	if index < 247 then
-		local copy_mode = (index - 235) // 4
+		local copy_mode = 6 + (index - 235) // 4
 		local add_size = update_here(address_cache, 1 + ((index - 235) % 4))
 		return { "ADD", add_size }, { "CPY", 4, decode( copy_mode, 4 ) }, index
 	end
@@ -341,6 +341,7 @@ end
 
 function print_header(header, header_size)
 	io.write(([[
+
 VCDIFF version:               %s
 VCDIFF header size:           %s
 VCDIFF header indicator:      %s
@@ -361,6 +362,7 @@ end
 
 function print_window_header(window_header, window_index, window_offset)
 		io.write(([[
+
 
 VCDIFF window number:         %s
 VCDIFF window indicator:      %s
